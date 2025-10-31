@@ -23,7 +23,8 @@ let progressStore = {
   total: 0,
   sent: 0,
   campaignName: '',
-  status: 'idle'
+  status: 'idle',
+  leads: [] // Array de leads com status individual
 };
 
 // Lista de clientes SSE conectados
@@ -98,18 +99,32 @@ app.post('/api/auth/login', (req, res) => {
 // POST /api/leads (PROTEGIDA)
 app.post('/api/leads', authMiddleware, async (req, res) => {
   try {
+    // Verifica se já existe uma campanha em execução
+    if (progressStore.status === 'running') {
+      return res.status(400).json({ error: 'Já existe uma campanha em execução. Aguarde a finalização ou pare a campanha atual.' });
+    }
+
     const { campaignName, leads } = req.body;
 
     if (!campaignName || !leads || !Array.isArray(leads)) {
       return res.status(400).json({ error: 'Dados inválidos' });
     }
 
+    // Cria array de leads com status inicial
+    const leadsWithStatus = leads.map(lead => ({
+      name: lead.name,
+      phone: lead.phone,
+      status: 'pending', // pending, success, error
+      sentAt: null
+    }));
+
     // Atualiza o progresso inicial
     progressStore = {
       total: leads.length,
       sent: 0,
       campaignName: campaignName,
-      status: 'running'
+      status: 'running',
+      leads: leadsWithStatus
     };
 
     // Faz broadcast do progresso inicial
@@ -140,13 +155,33 @@ app.post('/api/leads', authMiddleware, async (req, res) => {
 
 // POST /api/progress (chamado pelo n8n)
 app.post('/api/progress', n8nAuth, (req, res) => {
-  const { campaignName, sent, total, status } = req.body;
+  const { campaignName, sent, total, status, lastLead, lastPhone } = req.body;
+
+  // Se há informação sobre o último lead processado, atualiza seu status
+  if (lastLead && lastPhone && progressStore.leads) {
+    const leadIndex = progressStore.leads.findIndex(
+      lead => lead.name === lastLead && lead.phone === lastPhone
+    );
+
+    if (leadIndex !== -1) {
+      // Atualiza status do lead baseado no status geral
+      // Se status é 'done' ou 'running', assumimos sucesso (pode ser ajustado conforme lógica do n8n)
+      // Se precisar detectar erro, o n8n deve enviar status específico ou campo adicional
+      if (status === 'done' || status === 'running') {
+        progressStore.leads[leadIndex].status = 'success';
+        progressStore.leads[leadIndex].sentAt = new Date().toISOString();
+      }
+      // Se o n8n enviar status 'error' no status geral, podemos marcar como erro
+      // Mas geralmente cada lead terá seu próprio resultado
+    }
+  }
 
   // Atualiza o store de progresso
   progressStore = {
+    ...progressStore,
     campaignName: campaignName || progressStore.campaignName,
-    sent: sent !== undefined ? sent : progressStore.sent,
-    total: total !== undefined ? total : progressStore.total,
+    sent: sent !== undefined ? parseInt(sent) : progressStore.sent,
+    total: total !== undefined ? parseInt(total) : progressStore.total,
     status: status || progressStore.status
   };
 
@@ -159,6 +194,60 @@ app.post('/api/progress', n8nAuth, (req, res) => {
 // GET /api/progress (PROTEGIDA)
 app.get('/api/progress', authMiddleware, (req, res) => {
   return res.json(progressStore);
+});
+
+// POST /api/stop (PROTEGIDA) - Para o disparo
+app.post('/api/stop', authMiddleware, async (req, res) => {
+  try {
+    if (progressStore.status !== 'running') {
+      return res.status(400).json({ error: 'Nenhuma campanha em execução' });
+    }
+
+    // Atualiza status para stopped
+    progressStore.status = 'stopped';
+
+    // Marca leads pendentes como não enviados (mantém o status)
+    if (progressStore.leads) {
+      progressStore.leads.forEach(lead => {
+        if (lead.status === 'pending') {
+          lead.status = 'not_sent';
+        }
+      });
+    }
+
+    // Envia comando de stop para o n8n
+    try {
+      await axios.post(N8N_WEBHOOK_URL, {
+        action: 'stop',
+        campaignName: progressStore.campaignName
+      });
+    } catch (error) {
+      console.error('Erro ao enviar stop para n8n:', error.message);
+    }
+
+    // Faz broadcast
+    broadcastProgress();
+
+    return res.json({ message: 'Disparo parado com sucesso' });
+  } catch (error) {
+    console.error('Erro ao parar disparo:', error);
+    return res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// POST /api/reset (PROTEGIDA) - Reseta para nova campanha
+app.post('/api/reset', authMiddleware, (req, res) => {
+  progressStore = {
+    total: 0,
+    sent: 0,
+    campaignName: '',
+    status: 'idle',
+    leads: []
+  };
+
+  broadcastProgress();
+
+  return res.json({ message: 'Painel resetado para nova campanha' });
 });
 
 // GET /api/progress/stream (SSE - PROTEGIDA via query token)
