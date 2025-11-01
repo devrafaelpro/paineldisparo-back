@@ -24,7 +24,9 @@ let progressStore = {
   sent: 0,
   campaignName: '',
   status: 'idle',
-  leads: [] // Array de leads com status individual
+  leads: [], // Array de leads com status individual
+  tempoParaEnvio: null, // Tempo em segundos até próximo envio
+  timestampRecebido: null // Timestamp quando recebeu o tempo
 };
 
 // Lista de clientes SSE conectados
@@ -155,7 +157,7 @@ app.post('/api/leads', authMiddleware, async (req, res) => {
 
 // POST /api/progress (chamado pelo n8n)
 app.post('/api/progress', n8nAuth, (req, res) => {
-  const { campaignName, sent, total, status, lastLead, lastPhone } = req.body;
+  const { campaignName, sent, total, status, lastLead, lastPhone, tempoParaEnvio } = req.body;
 
   // Se há informação sobre o último lead processado, atualiza seu status
   if (lastLead && lastPhone && progressStore.leads) {
@@ -176,13 +178,24 @@ app.post('/api/progress', n8nAuth, (req, res) => {
     }
   }
 
+  // Atualiza o tempo para próximo envio se fornecido
+  let tempoParaEnvioAtualizado = progressStore.tempoParaEnvio;
+  let timestampRecebidoAtualizado = progressStore.timestampRecebido;
+  
+  if (tempoParaEnvio !== undefined && tempoParaEnvio !== null) {
+    tempoParaEnvioAtualizado = parseInt(tempoParaEnvio);
+    timestampRecebidoAtualizado = Date.now();
+  }
+
   // Atualiza o store de progresso
   progressStore = {
     ...progressStore,
     campaignName: campaignName || progressStore.campaignName,
     sent: sent !== undefined ? parseInt(sent) : progressStore.sent,
     total: total !== undefined ? parseInt(total) : progressStore.total,
-    status: status || progressStore.status
+    status: status || progressStore.status,
+    tempoParaEnvio: tempoParaEnvioAtualizado,
+    timestampRecebido: timestampRecebidoAtualizado
   };
 
   // Faz broadcast para todos os clientes SSE
@@ -242,7 +255,9 @@ app.post('/api/reset', authMiddleware, (req, res) => {
     sent: 0,
     campaignName: '',
     status: 'idle',
-    leads: []
+    leads: [],
+    tempoParaEnvio: null,
+    timestampRecebido: null
   };
 
   broadcastProgress();
